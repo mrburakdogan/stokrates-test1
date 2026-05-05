@@ -3,12 +3,12 @@ import { getTrendyolConfig, saveSystemLog, generateId } from './db';
 const TRENDYOL_API_BASE = 'https://api.trendyol.com/sapigw';
 
 // --- Authorization ---
-const getHeaders = (apiKey: string, apiSecret: string) => {
+const getHeaders = (apiKey: string, apiSecret: string, supplierId: string) => {
     const authString = btoa(`${apiKey}:${apiSecret}`);
     return {
         'Authorization': `Basic ${authString}`,
         'Content-Type': 'application/json',
-        'User-Agent': 'AristokratesApp/1.0'
+        'User-Agent': `${supplierId} - AristokratesApp`
     };
 };
 
@@ -161,7 +161,7 @@ export const fetchTrendyolProducts = async () => {
         // Use our Netlify Proxy Function
         const response = await fetchViaProxy(url, {
             method: 'GET',
-            headers: getHeaders(config.apiKey, config.apiSecret)
+            headers: getHeaders(config.apiKey, config.apiSecret, config.supplierId)
         });
 
         const responseText = await response.text();
@@ -244,7 +244,7 @@ export const fetchTrendyolOrders = async (status: string = 'Created') => {
     try {
         const response = await fetchViaProxy(url, {
             method: 'GET',
-            headers: getHeaders(config.apiKey, config.apiSecret)
+            headers: getHeaders(config.apiKey, config.apiSecret, config.supplierId)
         });
 
         const responseText = await response.text();
