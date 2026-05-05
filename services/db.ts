@@ -46,56 +46,46 @@ function saveSetting<T>(key: string, value: T): void {
 // ============================================================
 
 async function _syncCollection<T>(key: string, data: T[]): Promise<void> {
-  try {
-    const { data: { session } } = await supabase.auth.getSession();
-    const user = session?.user;
-    if (!user) return; // Sadece giriş yapılmışsa senkronize et
+  // Uygulama kendi localStorage auth'unu kullanır, Supabase Auth kullanmaz.
+  // Yerel oturum yoksa sync yapma.
+  if (!localStorage.getItem('user_session')) return;
 
-    const deleteResult = await supabase.from('app_data').delete().eq('collection', key);
-    if (deleteResult.error) {
-      console.error(`[Supabase] DELETE hatası (${key}):`, deleteResult.error);
-    }
-    
+  try {
+    await supabase.from('app_data').delete().eq('collection', key);
+
     if (data.length > 0) {
       const rows = data.map((item: any) => ({
-        user_id: user.id,
         collection: key,
-        item_id: item.id ?? key,
+        item_id: String(item.id ?? key),
         data: item,
       }));
-      
-      // Çok büyük verileri (örn. uzun history içeren ürünler) engellemek için 50'şerli gruplar halinde kaydet
+
       const CHUNK_SIZE = 50;
       for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
         const chunk = rows.slice(i, i + CHUNK_SIZE);
-        const insertResult = await supabase.from('app_data').insert(chunk);
-        if (insertResult.error) {
-          console.error(`[Supabase] INSERT hatası (${key} - chunk ${i}):`, insertResult.error);
-          throw insertResult.error; // Hata fırlat ki restoreDatabase bunu yakalayıp kullanıcıya bildirsin
+        const { error } = await supabase.from('app_data').insert(chunk);
+        if (error) {
+          console.warn(`[Supabase] INSERT hatası (${key} - chunk ${Math.floor(i / CHUNK_SIZE)}):`, error);
+          throw error; // restoreDatabase'in hatayı yakalaması için fırlat
         }
       }
-      console.log(`[Supabase] ✓ ${key} başarıyla kaydedildi (${rows.length} item)`);
     }
   } catch (err) {
-    console.error(`[Supabase] Koleksiyon sync hatası (${key}):`, err);
-    throw err; // Hatayı yukarı ilet
+    console.warn(`[Supabase] Koleksiyon sync hatası (${key}):`, err);
+    throw err;
   }
 }
 
 async function _syncSetting<T>(key: string, value: T): Promise<void> {
-  try {
-    const { data: { session } } = await supabase.auth.getSession();
-    const user = session?.user;
-    if (!user) return;
+  if (!localStorage.getItem('user_session')) return;
 
-    const result = await supabase.from('app_settings').upsert({ user_id: user.id, key, value });
-    if (result.error) {
-      console.error(`[Supabase] Ayar sync hatası (${key}):`, result.error);
-    } else {
-      console.log(`[Supabase] ✓ ${key} başarıyla kaydedildi`);
+  try {
+    const { error } = await supabase.from('app_settings').upsert({ key, value });
+    if (error) {
+      console.warn(`[Supabase] Ayar sync hatası (${key}):`, error);
     }
   } catch (err) {
-    console.error(`[Supabase] Ayar sync hatası (${key}):`, err);
+    console.warn(`[Supabase] Ayar sync hatası (${key}):`, err);
   }
 }
 
