@@ -20,9 +20,10 @@ import Messages from './pages/Messages';
 import TrendyolAnalysis from './pages/TrendyolAnalysis';
 import Reports from './pages/Reports';
 import { Menu, Moon, Sun, Bell, X, CheckSquare, Clock, Info, PackageSearch, AlertTriangle, Scale, Landmark, ArrowDownLeft, ArrowUpRight } from 'lucide-react';
-import { getCurrentUser, logoutUser, getTodos, getAnnouncementSettings, getProducts, getExpenses, getDebtCredits, initializeAppData } from './services/db';
-import { User, Todo, CustomAnnouncement, Product, AnnouncementFrequency, Expense, DebtCredit } from './types';
+import { getCurrentUser, logoutUser, getTodos, getAnnouncementSettings, getProducts, getExpenses, getDebtCredits, initializeAppData, saveSale, saveCustomer, getCustomers, generateId } from './services/db';
+import { User, Todo, CustomAnnouncement, Product, AnnouncementFrequency, Expense, DebtCredit, Sale, SaleItem } from './types';
 import { UserProfileMenu } from './components/UserProfileMenu';
+import { fetchTrendyolOrders } from './services/trendyol';
 
 const App: React.FC = () => {
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
@@ -50,8 +51,80 @@ const App: React.FC = () => {
       setIsAuthenticated(true);
       setCurrentUser(user);
       checkAnnouncements();
+      
+      // Trendyol Arka Plan Senkronizasyonu (5 dakikada bir)
+      const syncInterval = setInterval(() => {
+        syncTrendyolInBackground();
+      }, 5 * 60 * 1000);
+      
+      // İlk girişte hemen bir kez dene
+      syncTrendyolInBackground();
+
+      return () => clearInterval(syncInterval);
     }
   }, []);
+
+  const syncTrendyolInBackground = async () => {
+    try {
+      const result = await fetchTrendyolOrders();
+      if (result.success && result.data?.content) {
+        const trendyolOrders = result.data.content;
+        const currentProducts = getProducts();
+        const currentCustomers = getCustomers();
+        
+        for (const order of trendyolOrders) {
+          // Müşteri bul veya oluştur
+          const customerName = `${order.customerFirstName} ${order.customerLastName}`;
+          let customer = currentCustomers.find(c => c.name.toLowerCase() === customerName.toLowerCase());
+          
+          if (!customer) {
+            customer = {
+              id: generateId(),
+              name: customerName,
+              phone: '',
+              address: order.shippingAddress?.fullAddress || '',
+              gender: 'unspecified'
+            };
+            saveCustomer(customer);
+            currentCustomers.push(customer); // Döngü içinde güncel kalsın
+          }
+
+          // Satış kalemlerini hazırla
+          const items: SaleItem[] = order.lines.map((line: any) => {
+            const product = currentProducts.find(p => p.code === line.merchantSku || p.barcode === line.barcode);
+            return {
+              productId: product?.id || 'manual',
+              productName: line.productName,
+              quantity: line.quantity,
+              returnedQuantity: 0,
+              unitPrice: line.price,
+              totalPrice: line.price * line.quantity,
+              vatRate: 20
+            };
+          });
+
+          const newSale: Sale = {
+            id: generateId(),
+            orderNumber: order.orderNumber,
+            customerId: customer.id,
+            customerName: customer.name,
+            items: items,
+            subTotal: order.totalPrice,
+            discount: 0,
+            totalAmount: order.totalPrice,
+            totalVat: order.totalPrice * 0.20,
+            date: new Date(order.orderDate).toISOString(),
+            status: order.shipmentPackageStatus === 'Cancelled' ? 'cancelled' : 'completed',
+            platformId: 'trendyol'
+          };
+
+          saveSale(newSale);
+        }
+      }
+    } catch (error) {
+      console.error('Background Trendyol Sync Error:', error);
+    }
+  };
 
   useEffect(() => {
     const html = document.documentElement;

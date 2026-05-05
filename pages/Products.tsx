@@ -1,8 +1,9 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Plus, Trash2, Edit2, Search, ArrowUpDown, X, Download, Upload, Package, FileText, Image as ImageIcon, History, Barcode, Tag, Truck, Info, Bold, Italic, Underline, Strikethrough, List, ListOrdered, AlertCircle, AlignLeft, AlignCenter, AlignRight, AlignJustify, Heading1, Heading2, Link as LinkIcon, Undo, Redo, Eye, Globe, Clock, User, ArrowRight, Activity, Loader, CheckSquare, Square } from 'lucide-react';
 import { Product, ProductImage } from '../types';
-import { deleteProduct, generateId, getProducts, saveProduct } from '../services/db';
+import { deleteProduct, generateId, getProducts, saveProduct, saveSystemLog } from '../services/db';
 import { exportToExcel, importFromExcel } from '../services/excel';
+import { fetchTrendyolProducts } from '../services/trendyol';
 
 type SortKey = 'name' | 'category' | 'stock' | 'cost' | 'price';
 type TabType = 'general' | 'description' | 'images' | 'history';
@@ -15,6 +16,7 @@ const Products: React.FC = () => {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const imageUploadRef = useRef<HTMLInputElement>(null);
   const [isImporting, setIsImporting] = useState(false);
+  const [isSyncingTrendyol, setIsSyncingTrendyol] = useState(false);
   
   // Selection State
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -350,6 +352,70 @@ const Products: React.FC = () => {
       }
   };
 
+  const handleSyncTrendyolProducts = async () => {
+    setIsSyncingTrendyol(true);
+    try {
+        const result = await fetchTrendyolProducts();
+        if (result.success && result.data?.content) {
+            const trendyolProducts = result.data.content;
+            let count = 0;
+            const currentProducts = getProducts();
+
+            for (const tp of trendyolProducts) {
+                // Mevcut ürünü barkod veya koda göre bul
+                let existing = currentProducts.find(p => p.barcode === tp.barcode || p.code === tp.productCode);
+                
+                const productImages: ProductImage[] = [];
+                if (tp.images && tp.images.length > 0) {
+                    for (let i = 0; i < tp.images.length; i++) {
+                        const img = tp.images[i];
+                        const base64 = await urlToBase64(img.url);
+                        if (base64) {
+                            productImages.push({
+                                id: generateId(),
+                                data: base64,
+                                fileName: `${tp.productCode || 'tp'}-${i+1}.jpg`,
+                                type: 'image/jpeg'
+                            });
+                        }
+                    }
+                }
+
+                const productData: Product = {
+                    id: existing?.id || generateId(),
+                    code: tp.productCode || tp.barcode,
+                    barcode: tp.barcode,
+                    name: tp.title,
+                    brand: tp.brand?.name || '',
+                    category: tp.categoryName || 'Trendyol',
+                    stock: tp.quantity || 0,
+                    soldCount: existing?.soldCount || 0,
+                    desi: tp.desi || 0,
+                    price: tp.salePrice || 0,
+                    marketPrice: tp.listPrice || 0,
+                    minSalePrice: existing?.minSalePrice || 0,
+                    cost: existing?.cost || 0,
+                    vatRate: tp.vatRate || 20,
+                    description: existing?.description || '',
+                    images: productImages.length > 0 ? productImages : (existing?.images || []),
+                    history: existing?.history || []
+                };
+
+                saveProduct(productData);
+                count++;
+            }
+            alert(`${count} ürün Trendyol'dan başarıyla çekildi/güncellendi.`);
+            loadProducts();
+        } else {
+            alert(result.message || 'Ürünler çekilemedi.');
+        }
+    } catch (err: any) {
+        alert('Trendyol senkronizasyon hatası: ' + err.message);
+    } finally {
+        setIsSyncingTrendyol(false);
+    }
+  };
+
   const filteredProducts = products.filter(p => 
     p.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
     p.category.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -393,7 +459,15 @@ const Products: React.FC = () => {
                     <span>Seçilenleri Sil</span>
                 </button>
              )}
-             <button onClick={handleExport} className="bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded-lg flex items-center space-x-2 transition-colors text-sm">
+              <button 
+                onClick={handleSyncTrendyolProducts} 
+                disabled={isSyncingTrendyol}
+                className="bg-blue-50 text-blue-700 border border-blue-200 hover:bg-blue-100 px-3 py-2 rounded-lg flex items-center space-x-2 transition-colors text-sm disabled:opacity-70 disabled:cursor-wait"
+            >
+              {isSyncingTrendyol ? <Loader size={18} className="animate-spin"/> : <Globe size={18} />}
+              <span className="hidden md:inline">Trendyol'dan Çek</span>
+            </button>
+            <button onClick={handleExport} className="bg-green-600 hover:bg-green-700 text-white px-3 py-2 rounded-lg flex items-center space-x-2 transition-colors text-sm">
               <Download size={18} /> <span className="hidden md:inline">Excel Export</span>
             </button>
             <button 
@@ -402,7 +476,7 @@ const Products: React.FC = () => {
                 className="bg-orange-600 hover:bg-orange-700 text-white px-3 py-2 rounded-lg flex items-center space-x-2 transition-colors text-sm disabled:opacity-70 disabled:cursor-wait"
             >
               {isImporting ? <Clock size={18} className="animate-spin"/> : <Upload size={18} />}
-              <span className="hidden md:inline">{isImporting ? 'Excel Import' : 'Excel Import'}</span>
+              <span className="hidden md:inline">Excel Import</span>
             </button>
             <input type="file" ref={fileInputRef} onChange={handleImport} className="hidden" accept=".xlsx, .xls" />
 

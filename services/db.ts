@@ -516,6 +516,17 @@ export const saveTrendyolConfig = (config: TrendyolConfig): void =>
   saveSetting('trendyol_config', config);
 
 // ============================================================
+// TRENDYOL SENKRONIZASYON DURUMU
+// Son başarılı sipariş çekme zamanını saklar
+// ============================================================
+
+export const getTrendyolSyncState = (): { lastSyncedAt: number } | null =>
+  getLocalSetting<{ lastSyncedAt: number }>('trendyol_sync_state');
+
+export const saveTrendyolSyncState = (state: { lastSyncedAt: number }): void =>
+  saveSetting('trendyol_sync_state', state);
+
+// ============================================================
 // SİSTEM LOGLARI
 // ============================================================
 
