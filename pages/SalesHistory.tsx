@@ -32,7 +32,23 @@ const SalesHistory: React.FC = () => {
 
   useEffect(() => {
     loadSales();
-    syncTrendyolOrders(); // Sayfa açılışında otomatik çek
+    syncTrendyolOrders(); // Sayfa açılışında bir kez senkronize et
+
+    // Her 60 saniyede bir yerel verileri yenile (hafif, Trendyol'a istek atmaz)
+    const refreshInterval = setInterval(() => {
+      loadSales();
+    }, 60 * 1000);
+
+    // Her 5 dakikada bir Trendyol'dan yeni siparişleri çek (arka planda)
+    const syncInterval = setInterval(() => {
+      syncTrendyolOrders();
+    }, 5 * 60 * 1000);
+
+    return () => {
+      clearInterval(refreshInterval);
+      clearInterval(syncInterval);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const loadSales = () => {
@@ -193,12 +209,14 @@ const SalesHistory: React.FC = () => {
           trendyolOrders.forEach((order: any) => {
               const existing = existingSales.find((s: Sale) => s.orderNumber === String(order.orderNumber));
 
-              // --- Tarih: Trendyol'dan gelen orderDate (ms cinsinden epoch) kullan ---
-              const orderDate = order.orderDate
-                  ? new Date(order.orderDate).toISOString()
-                  : (order.lastModifiedDate
-                      ? new Date(order.lastModifiedDate).toISOString()
-                      : new Date().toISOString());
+              // --- Tarih: Trendyol UTC ms timestamp'ini doğru parse et ---
+              // Trendyol API'si sipariş tarihini UTC milisaniye olarak döner.
+              // new Date(ms) zaten UTC'yi doğru yorumlar; toISOString() da UTC bazlıdır.
+              // Türkiye'de gösterim için toLocaleDateString('tr-TR') yeterli.
+              const rawDate = order.orderDate ?? order.lastModifiedDate ?? null;
+              const orderDate = rawDate
+                  ? new Date(Number(rawDate)).toISOString()
+                  : new Date().toISOString();
 
               // --- Müşteri oluştur / güncelle ---
               const firstName = (order.shipmentAddress?.firstName || order.invoiceAddress?.firstName || order.customerFirstName || '').trim();
