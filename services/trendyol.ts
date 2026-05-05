@@ -3,14 +3,16 @@ import { getTrendyolConfig, saveTrendyolSyncState, getTrendyolSyncState, saveSys
 const TRENDYOL_API_BASE = 'https://api.trendyol.com/sapigw';
 
 // ============================================================
-// YETKILENDIRME
+// YETKİLENDİRME
 // ============================================================
 const getHeaders = (apiKey: string, apiSecret: string, supplierId: string) => {
     const authString = btoa(`${apiKey}:${apiSecret}`);
     return {
         'Authorization': `Basic ${authString}`,
         'Content-Type': 'application/json',
-        'User-Agent': `${supplierId} - STOKratesApp`
+        'Accept': 'application/json',
+        'User-Agent': `${supplierId} - SelfIntegration`,
+        'Accept-Language': 'tr-TR,tr;q=0.9'
     };
 };
 
@@ -30,18 +32,6 @@ const fetchViaProxy = async (targetUrl: string, options: RequestInit = {}) => {
         throw new Error(`Proxy Error ${response.status}: ${txt.substring(0, 200)}`);
     }
     return response;
-};
-
-// ============================================================
-// TÜRKİYE SAATİ — UTC+3 olarak şimdiki zaman (ms)
-// Trendyol API'si UTC ms kullanır, biz de aynı şekilde kullanırız.
-// Türkiye saati = UTC + 3 saat; ancak timestamp her zaman UTC ms'dir.
-// Bu fonksiyon sadece "Türkiye'de gün sonu" gibi hesaplar için kullanılır.
-// ============================================================
-const nowTR = (): number => {
-    // JavaScript'in Date.now() zaten UTC ms döndürür; Trendyol de UTC ms bekler.
-    // Türkiye'de gece yarısı = UTC 21:00 — biz her zaman Date.now() kullanabiliriz.
-    return Date.now();
 };
 
 // ============================================================
@@ -67,7 +57,7 @@ const fetchOrdersInWindow = async (
         const content: any[] = data.content || [];
         orders.push(...content);
 
-        // Trendyol bazen totalPages yerine sadece totalElements döner
+        // Trendyol bazen totalPages yerine totalElements döner
         if (typeof data.totalElements === 'number' && data.totalElements > 0) {
             totalPages = Math.ceil(data.totalElements / 200);
         } else {
@@ -75,18 +65,26 @@ const fetchOrdersInWindow = async (
         }
 
         page++;
-        if (page > 50) break; // Güvenlik limiti (10.000 sipariş/pencere)
+        if (page > 50) break; // Güvenlik limiti
     }
 
     return orders;
 };
 
 // ============================================================
-// ANA SİPARİŞ ÇEKME FONKSİYONU
-// Her çalışmada son 180 günü 30'ar günlük 6 pencereyle tarar.
-// endDate her zaman "yarın gece yarısı" olarak ayarlanır — bugün
-// teslim/güncellenen siparişlerin saat farkı (UTC+3) nedeniyle
-// pencere dışında kalması engellenir.
+// ANA SİPARİŞ ÇEKME FONKSİYONU — ARTIMSAL YAPI
+//
+// Mimari:
+//   - Geçmiş siparişler → her zaman DB'den okunur (getSales)
+//   - Bu fonksiyon yalnızca YENİ siparişleri Trendyol'dan çeker
+//
+// Çalışma mantığı:
+//   İlk çalışma (lastSyncedAt yok) → son 7 günü çek
+//   Sonraki çalışmalar             → lastSyncedAt - 1 saat arası (overlap)
+//
+// endDate = now + 1 gün:
+//   UTC+3 farkı nedeniyle Türkiye saatiyle bugün alınan siparişlerin
+//   kaçmaması için endDate her zaman biraz ileriye alınır.
 // ============================================================
 export const fetchTrendyolOrders = async (): Promise<{
     success: boolean;
@@ -99,159 +97,61 @@ export const fetchTrendyolOrders = async (): Promise<{
     }
 
     const headers = getHeaders(config.apiKey, config.apiSecret, config.supplierId) as Record<string, string>;
+    const syncState = getTrendyolSyncState();
     const now = Date.now();
     const DAY = 86400000;
+    const HOUR = 3600000;
 
-    // endDate: yarın gece sonu (UTC+3 = UTC-21:00) — bugün dahil tüm siparişleri yakalar
-    // Trendyol UTC ms alır; Türkiye'de "bugün biten" = UTC 21:00:00
-    // Güvenli taraf: now + 1 gün ekleyerek her durumda bugünü kapsıyoruz
+    // endDate: şimdiden 1 gün ilerisi — UTC+3 saat farkını absorbe eder
     const endDate = now + DAY;
 
-    // 180 günü 30'ar günlük 6 pencereye böl (eskiden yeniye)
-    const windows = [
-        { start: now - 180 * DAY, end: now - 150 * DAY },
-        { start: now - 150 * DAY, end: now - 120 * DAY },
-        { start: now - 120 * DAY, end: now - 90 * DAY  },
-        { start: now - 90  * DAY, end: now - 60 * DAY  },
-        { start: now - 60  * DAY, end: now - 30 * DAY  },
-        { start: now - 30  * DAY, end: endDate          }, // ← bugün + yarın güvencesi
-    ];
+    // startDate: ilk çalışmada son 7 gün, sonrasında son sync'ten 1 saat öncesi
+    const isFirstRun = !syncState?.lastSyncedAt;
+    const startDate = isFirstRun
+        ? now - 7 * DAY
+        : syncState!.lastSyncedAt - HOUR;
 
     saveSystemLog({
         id: generateId(),
         date: new Date().toISOString(),
         source: 'Trendyol Entegrasyonu',
         type: 'info',
-        title: 'Sipariş Taraması Başladı',
-        message: `Son 180 gün 6 pencereyle taranıyor (${new Date(windows[0].start).toLocaleDateString('tr-TR')} – ${new Date(now).toLocaleDateString('tr-TR')})`
-    });
-
-    const allOrders: any[] = [];
-    let successCount = 0;
-    let lastError = '';
-
-    for (const win of windows) {
-        try {
-            const orders = await fetchOrdersInWindow(config.supplierId, headers, win.start, win.end);
-            allOrders.push(...orders);
-            successCount++;
-        } catch (err: any) {
-            lastError = err.message;
-            console.warn(`[Trendyol] Pencere hatası (${new Date(win.start).toLocaleDateString('tr-TR')}):`, err.message);
-            // Proxy bulunamadıysa veya ağ kopuksa devam etmenin anlamı yok
-            if (err.message === 'PROXY_NOT_FOUND' || err.message.includes('Failed to fetch')) break;
-            if (err.message.includes('403')) break;
-        }
-    }
-
-    // Hiç pencere başarılı olmadıysa — gerçek hata
-    if (successCount === 0) {
-        saveSystemLog({
-            id: generateId(),
-            date: new Date().toISOString(),
-            source: 'Trendyol Entegrasyonu',
-            type: 'error',
-            title: 'Bağlantı Başarısız',
-            message: lastError || 'Trendyol API\'ye ulaşılamadı.'
-        });
-        return { success: false, message: lastError || 'Trendyol API\'ye ulaşılamadı.' };
-    }
-
-    // Tekrar eden siparişleri orderNumber'a göre temizle
-    const unique = Array.from(
-        new Map(allOrders.map(o => [String(o.orderNumber), o])).values()
-    );
-
-    // Sync zamanını güncelle
-    saveTrendyolSyncState({ lastSyncedAt: now });
-
-    saveSystemLog({
-        id: generateId(),
-        date: new Date().toISOString(),
-        source: 'Trendyol Entegrasyonu',
-        type: 'success',
-        title: 'Senkronizasyon Tamamlandı',
-        message: `${unique.length} benzersiz sipariş alındı (${successCount}/6 pencere başarılı).`
-    });
-
-    return {
-        success: true,
-        data: { content: unique, totalElements: unique.length }
-    };
-};
-
-
-
-// ============================================================
-// ÜRÜN ÇEKME — Trendyol'daki ürünleri getir
-// ============================================================
-export const fetchTrendyolProducts = async (): Promise<{
-    success: boolean;
-    data?: any;
-    message?: string;
-}> => {
-    const config = getTrendyolConfig();
-    if (!config?.isActive) {
-        return { success: false, message: 'Entegrasyon aktif değil.' };
-    }
-
-    const headers = getHeaders(config.apiKey, config.apiSecret, config.supplierId) as Record<string, string>;
-    const allProducts: any[] = [];
-    let page = 0;
-    let totalPages = 1;
-
-    saveSystemLog({
-        id: generateId(),
-        date: new Date().toISOString(),
-        source: 'Trendyol Entegrasyonu',
-        type: 'info',
-        title: 'Ürün Listesi Çekiliyor',
-        message: 'Trendyol ürün kataloğu alınıyor...'
+        title: isFirstRun ? 'İlk Sipariş Çekimi (7 gün)' : 'Yeni Sipariş Kontrolü',
+        message: `${new Date(startDate).toLocaleString('tr-TR')} → ${new Date(endDate).toLocaleString('tr-TR')}`
     });
 
     try {
-        while (page < totalPages) {
-            const url = `${TRENDYOL_API_BASE}/suppliers/${config.supplierId}/products?page=${page}&size=200&approved=true`;
-            const response = await fetchViaProxy(url, { method: 'GET', headers });
-            const text = await response.text();
-            const data = JSON.parse(text);
+        const orders = await fetchOrdersInWindow(config.supplierId, headers, startDate, endDate);
 
-            allProducts.push(...(data.content || []));
-            totalPages = data.totalPages ?? 1;
-            page++;
-            if (page > 100) break;
-        }
+        // Dedup — güvenlik için
+        const unique = Array.from(
+            new Map(orders.map(o => [String(o.orderNumber), o])).values()
+        );
+
+        // Başarılı çekim → sync zamanını güncelle
+        saveTrendyolSyncState({ lastSyncedAt: now });
 
         saveSystemLog({
             id: generateId(),
             date: new Date().toISOString(),
             source: 'Trendyol Entegrasyonu',
             type: 'success',
-            title: 'Ürünler Alındı',
-            message: `${allProducts.length} ürün çekildi.`
+            title: 'Yeni Siparişler Alındı',
+            message: `${unique.length} sipariş döndü. Yeni olanlar DB'ye işlenecek.`
         });
 
-        return {
-            success: true,
-            data: { content: allProducts, totalElements: allProducts.length }
-        };
+        return { success: true, data: { content: unique, totalElements: unique.length } };
 
     } catch (err: any) {
-        const isLocal = err.message === 'PROXY_NOT_FOUND' || err.message.includes('Failed to fetch');
         saveSystemLog({
             id: generateId(),
             date: new Date().toISOString(),
             source: 'Trendyol Entegrasyonu',
-            type: 'warning',
-            title: isLocal ? 'Simülasyon Modu' : 'Ürün Çekme Hatası',
+            type: 'error',
+            title: 'Sipariş Çekme Hatası',
             message: err.message
         });
-
-        return {
-            success: isLocal,
-            data: isLocal ? getMockTrendyolData() : undefined,
-            message: err.message
-        };
+        return { success: false, message: err.message };
     }
 };
 
@@ -317,7 +217,7 @@ export const testConnection = async (config: any): Promise<{ success: boolean; m
 };
 
 // ============================================================
-// KATEGORİ ÖZELLİKLERİ (yeni ürün ekleme için)
+// KATEGORİ ÖZELLİKLERİ
 // ============================================================
 export const fetchCategoryAttributes = async (categoryId: number): Promise<{
     success: boolean;
@@ -362,44 +262,3 @@ export const fetchCategories = async (): Promise<{
         return { success: false, message: err.message };
     }
 };
-
-// ============================================================
-// SIMÜLASYON VERİLERİ (local/proxy yok durumunda)
-// ============================================================
-const getMockTrendyolData = () => ({
-    totalElements: 3, totalPages: 1, page: 0, size: 10,
-    content: [
-        {
-            id: 'MOCK-001', productCode: 'TS-BLK-L', barcode: '868000000001',
-            brand: { name: 'STOKrates' }, title: 'Erkek Parfüm - Black Edition (Simülasyon)',
-            categoryName: 'Kozmetik', quantity: 150, salePrice: 450, listPrice: 600,
-            vatRate: 20, images: [{ url: 'https://images.unsplash.com/photo-1541643600914-78b084683601?w=300' }]
-        },
-        {
-            id: 'MOCK-002', productCode: 'TS-WHT-S', barcode: '868000000002',
-            brand: { name: 'STOKrates' }, title: 'Kadın Parfüm - White Flowers (Simülasyon)',
-            categoryName: 'Kozmetik', quantity: 85, salePrice: 520, listPrice: 700,
-            vatRate: 20, images: [{ url: 'https://images.unsplash.com/photo-1594035910387-fea4779426e9?w=300' }]
-        }
-    ]
-});
-
-const getMockTrendyolOrdersData = () => ({
-    totalElements: 2, totalPages: 1, page: 0, size: 50,
-    content: [
-        {
-            orderNumber: 'TY-MOCK-001',
-            customerFirstName: 'Ahmet', customerLastName: 'Yılmaz',
-            totalPrice: 450, shipmentPackageStatus: 'Delivered',
-            orderDate: Date.now() - 2 * 86400000,
-            lines: [{ merchantSku: 'TS-BLK-L', productName: 'Erkek Parfüm', quantity: 1, amount: 450 }]
-        },
-        {
-            orderNumber: 'TY-MOCK-002',
-            customerFirstName: 'Ayşe', customerLastName: 'Kaya',
-            totalPrice: 1040, shipmentPackageStatus: 'Created',
-            orderDate: Date.now() - 86400000,
-            lines: [{ merchantSku: 'TS-WHT-S', productName: 'Kadın Parfüm', quantity: 2, amount: 520 }]
-        }
-    ]
-});

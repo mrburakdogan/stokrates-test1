@@ -32,22 +32,13 @@ const SalesHistory: React.FC = () => {
 
   useEffect(() => {
     loadSales();
-    syncTrendyolOrders(); // Sayfa açılışında bir kez senkronize et
 
-    // Her 60 saniyede bir yerel verileri yenile (hafif, Trendyol'a istek atmaz)
+    // Her 60 saniyede bir yerel DB'den verileri yenile (Trendyol'a istek atmaz)
     const refreshInterval = setInterval(() => {
       loadSales();
     }, 60 * 1000);
 
-    // Her 5 dakikada bir Trendyol'dan yeni siparişleri çek (arka planda)
-    const syncInterval = setInterval(() => {
-      syncTrendyolOrders();
-    }, 5 * 60 * 1000);
-
-    return () => {
-      clearInterval(refreshInterval);
-      clearInterval(syncInterval);
-    };
+    return () => clearInterval(refreshInterval);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -190,94 +181,75 @@ const SalesHistory: React.FC = () => {
     return sortOrder === 'newest' ? orderB.localeCompare(orderA) : orderA.localeCompare(orderB);
   });
 
-  // Trendyol siparişlerini işleyip kaydet (hem sayfa açılışında hem manuel çağrıda kullanılır)
+  // Manuel Trendyol senkronizasyonu — sadece bu buton çağırdığında Trendyol'a gider
+  // Arka plan senkronizasyonu App.tsx'te 5 dakikada bir otomatik çalışır
   const syncTrendyolOrders = async (manual = false) => {
       setIsFetchingTrendyol(true);
       if (manual) setTrendyolSyncMessage(null);
 
-      const result = await fetchTrendyolOrders();
-      if (result.success && result.data && result.data.content) {
-          const trendyolOrders = result.data.content;
-          let newOrdersCount = 0;
+      try {
+          const result = await fetchTrendyolOrders();
+          if (result.success && result.data && result.data.content) {
+              const trendyolOrders = result.data.content;
+              let newOrdersCount = 0;
 
-          const existingSales = getSales();
-          const products = getProducts();
-          const platforms = getPlatforms();
-          const trendyolPlatform = platforms.find((p: Platform) => p.name.toLowerCase().includes('trendyol'));
-          const existingCustomers = getCustomers();
+              const existingSales = getSales();
+              const products = getProducts();
+              const platforms = getPlatforms();
+              const trendyolPlatform = platforms.find((p: Platform) => p.name.toLowerCase().includes('trendyol'));
+              const existingCustomers = getCustomers();
 
-          trendyolOrders.forEach((order: any) => {
-              const existing = existingSales.find((s: Sale) => s.orderNumber === String(order.orderNumber));
+              trendyolOrders.forEach((order: any) => {
+                  // Sipariş numarası zaten varsa atla (DB öncelikli)
+                  const alreadyExists = existingSales.some((s: Sale) => s.orderNumber === String(order.orderNumber));
+                  if (alreadyExists) return;
 
-              // --- Tarih: Trendyol UTC ms timestamp'ini doğru parse et ---
-              // Trendyol API'si sipariş tarihini UTC milisaniye olarak döner.
-              // new Date(ms) zaten UTC'yi doğru yorumlar; toISOString() da UTC bazlıdır.
-              // Türkiye'de gösterim için toLocaleDateString('tr-TR') yeterli.
-              const rawDate = order.orderDate ?? order.lastModifiedDate ?? null;
-              const orderDate = rawDate
-                  ? new Date(Number(rawDate)).toISOString()
-                  : new Date().toISOString();
+                  // Tarih
+                  const rawDate = order.orderDate ?? order.lastModifiedDate ?? null;
+                  const orderDate = rawDate
+                      ? new Date(Number(rawDate)).toISOString()
+                      : new Date().toISOString();
 
-              // --- Müşteri oluştur / güncelle ---
-              const firstName = (order.shipmentAddress?.firstName || order.invoiceAddress?.firstName || order.customerFirstName || '').trim();
-              const lastName = (order.shipmentAddress?.lastName || order.invoiceAddress?.lastName || order.customerLastName || '').trim();
-              const fullName = `${firstName} ${lastName}`.trim() || 'Bilinmeyen Müşteri';
-              const phone = order.shipmentAddress?.phone || order.invoiceAddress?.phone || '';
-              const address = [
-                  order.shipmentAddress?.address1,
-                  order.shipmentAddress?.city,
-                  order.shipmentAddress?.district
-              ].filter(Boolean).join(', ');
+                  // Müşteri
+                  const firstName = (order.shipmentAddress?.firstName || order.customerFirstName || '').trim();
+                  const lastName = (order.shipmentAddress?.lastName || order.customerLastName || '').trim();
+                  const fullName = `${firstName} ${lastName}`.trim() || 'Bilinmeyen Müşteri';
+                  const phone = order.shipmentAddress?.phone || '';
+                  const address = [order.shipmentAddress?.address1, order.shipmentAddress?.city, order.shipmentAddress?.district].filter(Boolean).join(', ');
 
-              let customerId: string;
-              const normalizedName = fullName.toLowerCase();
-              const existingCustomer = existingCustomers.find(
-                  (c: Customer) => c.name.toLowerCase() === normalizedName
-              );
+                  let customerId: string;
+                  const existingCustomer = existingCustomers.find((c: Customer) => c.name.toLowerCase() === fullName.toLowerCase());
 
-              if (existingCustomer) {
-                  customerId = existingCustomer.id;
-                  // Adres/telefon güncellemesi
-                  if (!existingCustomer.phone && phone) {
-                      saveCustomer({ ...existingCustomer, phone, address: address || existingCustomer.address });
+                  if (existingCustomer) {
+                      customerId = existingCustomer.id;
+                  } else {
+                      customerId = generateId();
+                      const newCustomer: Customer = { id: customerId, name: fullName, phone, address };
+                      saveCustomer(newCustomer);
+                      existingCustomers.push(newCustomer);
                   }
-              } else {
-                  customerId = generateId();
-                  const newCustomer: Customer = {
-                      id: customerId,
-                      name: fullName,
-                      phone: phone,
-                      address: address
-                  };
-                  saveCustomer(newCustomer);
-                  existingCustomers.push(newCustomer); // aynı siparişte tekrar oluşturulmaması için
-              }
 
-              // --- Sipariş satırları ---
-              const orderLines = order.lines || [];
-              const saleItems: SaleItem[] = orderLines.map((line: any) => {
-                  const product = products.find(
-                      (p: Product) => p.code === line.merchantSku || p.barcode === line.barcode
-                  );
-                  const unitPrice = line.amount ?? line.price ?? 0;
-                  const qty = line.quantity ?? 1;
-                  const vatRate = line.vatBaseAmount ? 20 : 20;
-                  const totalPrice = unitPrice * qty;
-                  return {
-                      productId: product ? product.id : generateId(),
-                      productName: line.productName || line.productCode || 'Bilinmeyen Ürün',
-                      quantity: qty,
-                      unitPrice,
-                      totalPrice,
-                      vatRate,
-                      vatAmount: (totalPrice * vatRate) / (100 + vatRate),
-                      returnedQuantity: 0
-                  };
-              });
+                  // Kalemler
+                  const orderLines = order.lines || [];
+                  const saleItems: SaleItem[] = orderLines.map((line: any) => {
+                      const product = products.find((p: Product) => p.code === line.merchantSku || p.barcode === line.barcode);
+                      const unitPrice = line.amount ?? line.price ?? 0;
+                      const qty = line.quantity ?? 1;
+                      const totalPrice = unitPrice * qty;
+                      return {
+                          productId: product ? product.id : generateId(),
+                          productName: line.productName || 'Bilinmeyen Ürün',
+                          quantity: qty,
+                          unitPrice,
+                          totalPrice,
+                          vatRate: 20,
+                          vatAmount: (totalPrice * 20) / 120,
+                          returnedQuantity: 0
+                      };
+                  });
 
-              const totalAmount = order.totalPrice ?? saleItems.reduce((s: number, i: SaleItem) => s + i.totalPrice, 0);
+                  const totalAmount = order.totalPrice ?? saleItems.reduce((s: number, i: SaleItem) => s + i.totalPrice, 0);
 
-              if (!existing) {
                   const newSale: Sale = {
                       id: generateId(),
                       orderNumber: String(order.orderNumber),
@@ -287,26 +259,36 @@ const SalesHistory: React.FC = () => {
                       subTotal: totalAmount,
                       discount: order.totalDiscount ?? 0,
                       totalAmount,
-                      totalVat: saleItems.reduce((s: number, i: SaleItem) => s + i.vatAmount, 0),
+                      totalVat: saleItems.reduce((s: number, i: SaleItem) => s + (i.vatAmount ?? 0), 0),
                       date: orderDate,
                       status: order.status === 'Cancelled' || order.shipmentPackageStatus === 'Cancelled' ? 'cancelled' : 'completed',
                       platformId: trendyolPlatform?.id || 'trendyol'
                   };
                   saveSale(newSale);
                   newOrdersCount++;
-              }
-          });
+              });
 
-          if (manual) {
-              setTrendyolSyncMessage(`${newOrdersCount} yeni sipariş eklendi.`);
-              setTimeout(() => setTrendyolSyncMessage(null), 4000);
+              if (manual) {
+                  setTrendyolSyncMessage(
+                      newOrdersCount > 0
+                          ? `${newOrdersCount} yeni sipariş eklendi.`
+                          : 'Yeni sipariş bulunamadı. Veriler güncel.'
+                  );
+                  setTimeout(() => setTrendyolSyncMessage(null), 4000);
+              }
+              loadSales();
+          } else if (manual) {
+              setTrendyolSyncMessage(result.message || 'Siparişler çekilemedi.');
+              setTimeout(() => setTrendyolSyncMessage(null), 5000);
           }
-          loadSales();
-      } else if (manual) {
-          setTrendyolSyncMessage(result.message || 'Siparişler çekilemedi.');
-          setTimeout(() => setTrendyolSyncMessage(null), 5000);
+      } catch (err: any) {
+          if (manual) {
+              setTrendyolSyncMessage('Bağlantı hatası.');
+              setTimeout(() => setTrendyolSyncMessage(null), 5000);
+          }
+      } finally {
+          setIsFetchingTrendyol(false);
       }
-      setIsFetchingTrendyol(false);
   };
 
   const getPlatformName = (platformId?: string) => {
