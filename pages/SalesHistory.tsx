@@ -301,7 +301,7 @@ const SalesHistory: React.FC = () => {
 
   const isTrendyolOrder = (sale: Sale) =>
       sale.platformId === 'trendyol' ||
-      getPlatformName(sale.platformId)?.toLowerCase().includes('trendyol') |||
+      !!getPlatformName(sale.platformId)?.toLowerCase().includes('trendyol') ||
       sale.orderNumber?.match(/^\d{9,}$/) != null; // Trendyol sipariş numaraları uzun sayısal
 
   return (
