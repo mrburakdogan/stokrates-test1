@@ -223,14 +223,19 @@ export const fetchTrendyolProducts = async () => {
 };
 
 // --- Fetch Orders ---
-export const fetchTrendyolOrders = async (status: string = 'Created') => {
+export const fetchTrendyolOrders = async () => {
     const config = getTrendyolConfig();
     
     if (!config || !config.isActive) {
         return { success: false, message: 'Entegrasyon aktif değil veya yapılandırılmamış.' };
     }
 
-    const url = `${TRENDYOL_API_BASE}/suppliers/${config.supplierId}/orders?status=${status}&size=50`;
+    // Trendyol geçmiş siparişleri çekmek için tarih aralığı ister (max 15-30 gün aralığına izin verir)
+    // Biz son 15 günün TÜM statülerdeki siparişlerini çekiyoruz.
+    const endDate = new Date().getTime();
+    const startDate = endDate - (15 * 24 * 60 * 60 * 1000); // 15 gün önce
+
+    const url = `${TRENDYOL_API_BASE}/suppliers/${config.supplierId}/orders?startDate=${startDate}&endDate=${endDate}&size=100`;
 
     saveSystemLog({
         id: generateId(),
