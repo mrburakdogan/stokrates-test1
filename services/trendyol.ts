@@ -83,8 +83,10 @@ const fetchOrdersInWindow = async (
 
 // ============================================================
 // ANA SİPARİŞ ÇEKME FONKSİYONU
-// Her çalışmada son 90 günü 15'er günlük 6 pencereyle tarar.
-// Pencere yapısı sayesinde hiçbir sipariş atlanmaz.
+// Her çalışmada son 180 günü 30'ar günlük 6 pencereyle tarar.
+// endDate her zaman "yarın gece yarısı" olarak ayarlanır — bugün
+// teslim/güncellenen siparişlerin saat farkı (UTC+3) nedeniyle
+// pencere dışında kalması engellenir.
 // ============================================================
 export const fetchTrendyolOrders = async (): Promise<{
     success: boolean;
@@ -100,15 +102,19 @@ export const fetchTrendyolOrders = async (): Promise<{
     const now = Date.now();
     const DAY = 86400000;
 
-    // Her zaman son 90 günü 15'er günlük pencerelere bölerek tara
-    // Bu sayede artımsal/tam geçmiş ayrımı ortadan kalkar ve hiçbir sipariş kaçmaz
+    // endDate: yarın gece sonu (UTC+3 = UTC-21:00) — bugün dahil tüm siparişleri yakalar
+    // Trendyol UTC ms alır; Türkiye'de "bugün biten" = UTC 21:00:00
+    // Güvenli taraf: now + 1 gün ekleyerek her durumda bugünü kapsıyoruz
+    const endDate = now + DAY;
+
+    // 180 günü 30'ar günlük 6 pencereye böl (eskiden yeniye)
     const windows = [
-        { start: now - 90 * DAY, end: now - 75 * DAY },
-        { start: now - 75 * DAY, end: now - 60 * DAY },
-        { start: now - 60 * DAY, end: now - 45 * DAY },
-        { start: now - 45 * DAY, end: now - 30 * DAY },
-        { start: now - 30 * DAY, end: now - 15 * DAY },
-        { start: now - 15 * DAY, end: now },
+        { start: now - 180 * DAY, end: now - 150 * DAY },
+        { start: now - 150 * DAY, end: now - 120 * DAY },
+        { start: now - 120 * DAY, end: now - 90 * DAY  },
+        { start: now - 90  * DAY, end: now - 60 * DAY  },
+        { start: now - 60  * DAY, end: now - 30 * DAY  },
+        { start: now - 30  * DAY, end: endDate          }, // ← bugün + yarın güvencesi
     ];
 
     saveSystemLog({
@@ -117,7 +123,7 @@ export const fetchTrendyolOrders = async (): Promise<{
         source: 'Trendyol Entegrasyonu',
         type: 'info',
         title: 'Sipariş Taraması Başladı',
-        message: `Son 90 gün 6 pencereyle taranıyor (${new Date(windows[0].start).toLocaleDateString('tr-TR')} – ${new Date(now).toLocaleDateString('tr-TR')})`
+        message: `Son 180 gün 6 pencereyle taranıyor (${new Date(windows[0].start).toLocaleDateString('tr-TR')} – ${new Date(now).toLocaleDateString('tr-TR')})`
     });
 
     const allOrders: any[] = [];
@@ -133,13 +139,8 @@ export const fetchTrendyolOrders = async (): Promise<{
             lastError = err.message;
             console.warn(`[Trendyol] Pencere hatası (${new Date(win.start).toLocaleDateString('tr-TR')}):`, err.message);
             // Proxy bulunamadıysa veya ağ kopuksa devam etmenin anlamı yok
-            if (err.message === 'PROXY_NOT_FOUND' || err.message.includes('Failed to fetch')) {
-                break;
-            }
-            // 403 gibi API hataları için de dur
-            if (err.message.includes('403')) {
-                break;
-            }
+            if (err.message === 'PROXY_NOT_FOUND' || err.message.includes('Failed to fetch')) break;
+            if (err.message.includes('403')) break;
         }
     }
 
@@ -178,6 +179,7 @@ export const fetchTrendyolOrders = async (): Promise<{
         data: { content: unique, totalElements: unique.length }
     };
 };
+
 
 
 // ============================================================
