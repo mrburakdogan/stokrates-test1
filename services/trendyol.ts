@@ -45,7 +45,7 @@ const nowTR = (): number => {
 };
 
 // ============================================================
-// SİPARİŞ ÇEKME — Belirli bir zaman aralığını tek pencerede paginated şekilde çek
+// SİPARİŞ ÇEKME — Belirli bir zaman aralığını sayfalı şekilde çek
 // ============================================================
 const fetchOrdersInWindow = async (
     supplierId: string,
@@ -67,9 +67,15 @@ const fetchOrdersInWindow = async (
         const content: any[] = data.content || [];
         orders.push(...content);
 
-        totalPages = data.totalPages ?? 1;
+        // Trendyol bazen totalPages yerine sadece totalElements döner
+        if (typeof data.totalElements === 'number' && data.totalElements > 0) {
+            totalPages = Math.ceil(data.totalElements / 200);
+        } else {
+            totalPages = data.totalPages ?? 1;
+        }
+
         page++;
-        if (page > 50) break; // güvenlik limiti
+        if (page > 50) break; // Güvenlik limiti (10.000 sipariş/pencere)
     }
 
     return orders;
@@ -77,8 +83,8 @@ const fetchOrdersInWindow = async (
 
 // ============================================================
 // ANA SİPARİŞ ÇEKME FONKSİYONU
-// İlk çalışma: Son 90 günü 6 bağımsız pencereyle çeker
-// Sonraki çalışmalar: Sadece son senkronizasyondan bu yana olan siparişleri çeker
+// Her çalışmada son 90 günü 15'er günlük 6 pencereyle tarar.
+// Pencere yapısı sayesinde hiçbir sipariş atlanmaz.
 // ============================================================
 export const fetchTrendyolOrders = async (): Promise<{
     success: boolean;
@@ -91,84 +97,71 @@ export const fetchTrendyolOrders = async (): Promise<{
     }
 
     const headers = getHeaders(config.apiKey, config.apiSecret, config.supplierId) as Record<string, string>;
-    const syncState = getTrendyolSyncState();
-    const now = nowTR();
+    const now = Date.now();
     const DAY = 86400000;
 
-    // İlk çalışma mı? → son 90 gün; değilse → son senkronizasyondan bu yana
-    const isFirstRun = !syncState?.lastSyncedAt;
-    const sinceMs = isFirstRun
-        ? now - 90 * DAY
-        : syncState!.lastSyncedAt - 60 * 60 * 1000; // 1 saat geri al (overlap için)
+    // Her zaman son 90 günü 15'er günlük pencerelere bölerek tara
+    // Bu sayede artımsal/tam geçmiş ayrımı ortadan kalkar ve hiçbir sipariş kaçmaz
+    const windows = [
+        { start: now - 90 * DAY, end: now - 75 * DAY },
+        { start: now - 75 * DAY, end: now - 60 * DAY },
+        { start: now - 60 * DAY, end: now - 45 * DAY },
+        { start: now - 45 * DAY, end: now - 30 * DAY },
+        { start: now - 30 * DAY, end: now - 15 * DAY },
+        { start: now - 15 * DAY, end: now },
+    ];
 
     saveSystemLog({
         id: generateId(),
         date: new Date().toISOString(),
         source: 'Trendyol Entegrasyonu',
         type: 'info',
-        title: isFirstRun ? 'İlk Senkronizasyon (90 gün)' : 'Artımsal Senkronizasyon',
-        message: isFirstRun
-            ? 'Son 90 günlük sipariş geçmişi çekiliyor...'
-            : `${new Date(sinceMs).toLocaleString('tr-TR')} tarihinden bu yana yeni siparişler aranıyor.`
+        title: 'Sipariş Taraması Başladı',
+        message: `Son 90 gün 6 pencereyle taranıyor (${new Date(windows[0].start).toLocaleDateString('tr-TR')} – ${new Date(now).toLocaleDateString('tr-TR')})`
     });
 
     const allOrders: any[] = [];
-    let anyWindowSucceeded = false;
+    let successCount = 0;
+    let lastError = '';
 
-    if (isFirstRun) {
-        // 6 bağımsız 15 günlük pencere (ilk çalışmada tüm geçmiş)
-        const windows = [
-            { start: now - 90 * DAY, end: now - 75 * DAY },
-            { start: now - 75 * DAY, end: now - 60 * DAY },
-            { start: now - 60 * DAY, end: now - 45 * DAY },
-            { start: now - 45 * DAY, end: now - 30 * DAY },
-            { start: now - 30 * DAY, end: now - 15 * DAY },
-            { start: now - 15 * DAY, end: now }
-        ];
-
-        for (const win of windows) {
-            try {
-                const orders = await fetchOrdersInWindow(config.supplierId, headers, win.start, win.end);
-                allOrders.push(...orders);
-                anyWindowSucceeded = true;
-            } catch (err: any) {
-                console.warn('[Trendyol] Pencere hatası:', err.message);
-                if (err.message === 'PROXY_NOT_FOUND' || err.message.includes('Failed to fetch')) break;
-            }
-        }
-    } else {
-        // Artımsal çekme — tek pencere (son sync → şimdi)
+    for (const win of windows) {
         try {
-            const orders = await fetchOrdersInWindow(config.supplierId, headers, sinceMs, now);
+            const orders = await fetchOrdersInWindow(config.supplierId, headers, win.start, win.end);
             allOrders.push(...orders);
-            anyWindowSucceeded = true;
+            successCount++;
         } catch (err: any) {
-            console.warn('[Trendyol] Artımsal çekme hatası:', err.message);
-
+            lastError = err.message;
+            console.warn(`[Trendyol] Pencere hatası (${new Date(win.start).toLocaleDateString('tr-TR')}):`, err.message);
+            // Proxy bulunamadıysa veya ağ kopuksa devam etmenin anlamı yok
             if (err.message === 'PROXY_NOT_FOUND' || err.message.includes('Failed to fetch')) {
-                return {
-                    success: true,
-                    data: getMockTrendyolOrdersData(),
-                    message: 'Lokal mod: Simülasyon verisi.'
-                };
+                break;
+            }
+            // 403 gibi API hataları için de dur
+            if (err.message.includes('403')) {
+                break;
             }
         }
     }
 
-    if (!anyWindowSucceeded) {
-        return {
-            success: true,
-            data: getMockTrendyolOrdersData(),
-            message: 'Bağlantı kurulamadı. Simülasyon verisi gösteriliyor.'
-        };
+    // Hiç pencere başarılı olmadıysa — gerçek hata
+    if (successCount === 0) {
+        saveSystemLog({
+            id: generateId(),
+            date: new Date().toISOString(),
+            source: 'Trendyol Entegrasyonu',
+            type: 'error',
+            title: 'Bağlantı Başarısız',
+            message: lastError || 'Trendyol API\'ye ulaşılamadı.'
+        });
+        return { success: false, message: lastError || 'Trendyol API\'ye ulaşılamadı.' };
     }
 
-    // Deduplicate
+    // Tekrar eden siparişleri orderNumber'a göre temizle
     const unique = Array.from(
         new Map(allOrders.map(o => [String(o.orderNumber), o])).values()
     );
 
-    // Başarılı çekme sonrası sync zamanını güncelle
+    // Sync zamanını güncelle
     saveTrendyolSyncState({ lastSyncedAt: now });
 
     saveSystemLog({
@@ -177,7 +170,7 @@ export const fetchTrendyolOrders = async (): Promise<{
         source: 'Trendyol Entegrasyonu',
         type: 'success',
         title: 'Senkronizasyon Tamamlandı',
-        message: `${unique.length} benzersiz sipariş alındı.`
+        message: `${unique.length} benzersiz sipariş alındı (${successCount}/6 pencere başarılı).`
     });
 
     return {
@@ -185,6 +178,7 @@ export const fetchTrendyolOrders = async (): Promise<{
         data: { content: unique, totalElements: unique.length }
     };
 };
+
 
 // ============================================================
 // ÜRÜN ÇEKME — Trendyol'daki ürünleri getir
