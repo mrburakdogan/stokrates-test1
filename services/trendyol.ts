@@ -217,6 +217,41 @@ export const testConnection = async (config: any): Promise<{ success: boolean; m
 };
 
 // ============================================================
+// ÜRÜN ÇEKME — Trendyol'daki ürünleri getir (şimdilik pasif)
+// ============================================================
+export const fetchTrendyolProducts = async (): Promise<{
+    success: boolean;
+    data?: any;
+    message?: string;
+}> => {
+    const config = getTrendyolConfig();
+    if (!config?.isActive) {
+        return { success: false, message: 'Entegrasyon aktif değil.' };
+    }
+
+    const headers = getHeaders(config.apiKey, config.apiSecret, config.supplierId) as Record<string, string>;
+    const allProducts: any[] = [];
+    let page = 0;
+    let totalPages = 1;
+
+    try {
+        while (page < totalPages) {
+            const url = `${TRENDYOL_API_BASE}/suppliers/${config.supplierId}/products?page=${page}&size=200&approved=true`;
+            const response = await fetchViaProxy(url, { method: 'GET', headers });
+            const text = await response.text();
+            const data = JSON.parse(text);
+            allProducts.push(...(data.content || []));
+            totalPages = data.totalPages ?? 1;
+            page++;
+            if (page > 100) break;
+        }
+        return { success: true, data: { content: allProducts, totalElements: allProducts.length } };
+    } catch (err: any) {
+        return { success: false, message: err.message };
+    }
+};
+
+// ============================================================
 // KATEGORİ ÖZELLİKLERİ
 // ============================================================
 export const fetchCategoryAttributes = async (categoryId: number): Promise<{
