@@ -230,33 +230,40 @@ export const fetchTrendyolOrders = async () => {
         return { success: false, message: 'Entegrasyon aktif değil veya yapılandırılmamış.' };
     }
 
-    // Son 90 günü çek (Trendyol max ~90 gün destekler; 15 günlük dilimlerle sayfalayabiliriz)
-    // Ancak tek istekte max 30 gün verir; biz 3 adet 30 günlük pencere açıyoruz.
+    // 6 adet 15 gunluk bagimsiz pencere - toplam 90 gun
+    // Her pencere ayri try/catch icinde - birinin hata vermesi digerlerini durdurmaz
+    const DAY = 86400000;
     const now = new Date().getTime();
     const windows = [
-        { start: now - 90 * 86400000, end: now - 60 * 86400000 },
-        { start: now - 60 * 86400000, end: now - 30 * 86400000 },
-        { start: now - 30 * 86400000, end: now }
+        { start: now - 90 * DAY, end: now - 75 * DAY, label: '75-90.gun' },
+        { start: now - 75 * DAY, end: now - 60 * DAY, label: '60-75.gun' },
+        { start: now - 60 * DAY, end: now - 45 * DAY, label: '45-60.gun' },
+        { start: now - 45 * DAY, end: now - 30 * DAY, label: '30-45.gun' },
+        { start: now - 30 * DAY, end: now - 15 * DAY, label: '15-30.gun' },
+        { start: now - 15 * DAY, end: now,             label: '0-15.gun (guncel)' }
     ];
 
     const allOrders: any[] = [];
+    let anyWindowSucceeded = false;
+    let lastError = '';
 
     saveSystemLog({
         id: generateId(),
         date: new Date().toISOString(),
         source: 'Trendyol Entegrasyonu',
         type: 'info',
-        title: 'Sipariş Çekme Başladı',
-        message: 'Son 90 günlük siparişler çekiliyor...'
+        title: 'Sipariş Çekme Basladi',
+        message: 'Son 90 gunluk siparisler 6 pencereyle cekiliyor...'
     });
 
-    try {
-        for (const win of windows) {
+    for (const win of windows) {
+        // Her pencere bagimsiz try/catch - hata diger pencereleri durdurmaz
+        try {
             let page = 0;
             let totalPages = 1;
 
             while (page < totalPages) {
-                const url = `${TRENDYOL_API_BASE}/suppliers/${config.supplierId}/orders?startDate=${win.start}&endDate=${win.end}&page=${page}&size=100`;
+                const url = `${TRENDYOL_API_BASE}/suppliers/${config.supplierId}/orders?startDate=${win.start}&endDate=${win.end}&page=${page}&size=200`;
 
                 const response = await fetchViaProxy(url, {
                     method: 'GET',
@@ -266,8 +273,7 @@ export const fetchTrendyolOrders = async () => {
                 const responseText = await response.text();
 
                 if (!response.ok) {
-                    // Bu pencerede hata varsa diğerine geç
-                    console.warn(`Trendyol pencere hatası (${page}):`, responseText.substring(0, 200));
+                    console.warn(`[Trendyol] Pencere ${win.label} sayfa ${page} hatasi:`, responseText.substring(0, 200));
                     break;
                 }
 
@@ -278,48 +284,34 @@ export const fetchTrendyolOrders = async () => {
                 totalPages = data.totalPages || 1;
                 page++;
 
-                // Çok fazla sayfa varsa dur (güvenlik)
-                if (page > 20) break;
+                if (page > 50) break;
+            }
+
+            anyWindowSucceeded = true;
+
+        } catch (err: any) {
+            lastError = err.message || 'Bilinmeyen hata';
+            console.warn(`[Trendyol] Pencere ${win.label} exception:`, lastError);
+
+            if (lastError === 'PROXY_NOT_FOUND' || lastError.includes('Failed to fetch')) {
+                break;
             }
         }
+    }
 
-        saveSystemLog({
-            id: generateId(),
-            date: new Date().toISOString(),
-            source: 'Trendyol Entegrasyonu',
-            type: 'success',
-            title: 'Sipariş Çekme Tamamlandı',
-            message: `Toplam ${allOrders.length} sipariş alındı.`
-        });
-
-        return {
-            success: true,
-            data: { content: allOrders, totalElements: allOrders.length }
-        };
-
-    } catch (error: any) {
-        console.error('Trendyol Fetch Orders Error:', error);
-
-        const errorMessage = error.message || 'Bilinmeyen hata';
-        let userMessage = errorMessage;
-        let isMock = false;
-
-        if (errorMessage === 'PROXY_NOT_FOUND' || errorMessage.includes('Failed to fetch')) {
-            userMessage = "Lokal Sunucu Modu: Proxy aktif değil. Simülasyon verisi gösteriliyor.";
-            isMock = true;
-        } else if (errorMessage.includes('401') || errorMessage.includes('403')) {
-            userMessage = "Trendyol Yetki Hatası: API Key ve Secret'ı kontrol ediniz.";
-            isMock = true;
-        }
+    if (!anyWindowSucceeded) {
+        const isMock = lastError === 'PROXY_NOT_FOUND' || lastError.includes('Failed to fetch') || lastError.includes('401') || lastError.includes('403');
+        const userMessage = isMock
+            ? 'Lokal Sunucu Modu: Proxy aktif degil veya yetki hatasi. Simulasyon verisi gosteriliyor.'
+            : `Baglanti hatasi: ${lastError}`;
 
         saveSystemLog({
             id: generateId(),
             date: new Date().toISOString(),
             source: 'Trendyol Entegrasyonu',
             type: 'warning',
-            title: isMock ? 'Simülasyon Modu Aktif' : 'Bağlantı Hatası',
-            message: userMessage,
-            stackTrace: error.stack
+            title: isMock ? 'Simulasyon Modu Aktif' : 'Baglanti Hatasi',
+            message: userMessage
         });
 
         return {
@@ -328,4 +320,22 @@ export const fetchTrendyolOrders = async () => {
             message: userMessage
         };
     }
-};
+
+    // Duplicate temizleme (farkli pencere araliklarindan ayni siparis gelebilir)
+    const unique = Array.from(
+        new Map(allOrders.map(o => [String(o.orderNumber), o])).values()
+    );
+
+    saveSystemLog({
+        id: generateId(),
+        date: new Date().toISOString(),
+        source: 'Trendyol Entegrasyonu',
+        type: 'success',
+        title: 'Siparis Cekme Tamamlandi',
+        message: `Toplam ${unique.length} benzersiz siparis alindi (${allOrders.length} ham kayit).`
+    });
+
+    return {
+        success: true,
+        data: { content: unique, totalElements: unique.length }
+    };
