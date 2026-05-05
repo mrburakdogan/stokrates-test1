@@ -339,3 +339,4 @@ export const fetchTrendyolOrders = async () => {
         success: true,
         data: { content: unique, totalElements: unique.length }
     };
+};
