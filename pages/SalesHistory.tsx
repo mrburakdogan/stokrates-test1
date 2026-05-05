@@ -2,8 +2,9 @@
 import React, { useEffect, useState, useRef } from 'react';
 /* Added Info to lucide-react imports */
 import { Search, ArrowUpDown, XCircle, Calendar, Receipt, AlertCircle, Trash2, CheckCircle, Download, Edit2, Upload, CheckSquare, Square, RotateCcw, X, Save, Info } from 'lucide-react';
-import { Sale, SaleItem, Customer, Product } from '../types';
-import { getSales, cancelSale, deleteSale, saveSale, generateId, getCustomers, getProducts, processSaleReturn } from '../services/db';
+import { Sale, SaleItem, Customer, Product, Platform } from '../types';
+import { getSales, cancelSale, deleteSale, saveSale, generateId, getCustomers, getProducts, processSaleReturn, getPlatforms } from '../services/db';
+import { fetchTrendyolOrders } from '../services/trendyol';
 import { exportToExcel, importFromExcel } from '../services/excel';
 import { useNavigate } from 'react-router-dom';
 
@@ -21,6 +22,9 @@ const SalesHistory: React.FC = () => {
 
   // Selection State
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  
+  // Trendyol Fetching State
+  const [isFetchingTrendyol, setIsFetchingTrendyol] = useState(false);
 
   useEffect(() => {
     loadSales();
@@ -158,6 +162,73 @@ const SalesHistory: React.FC = () => {
     return sortOrder === 'newest' ? orderB.localeCompare(orderA) : orderA.localeCompare(orderB);
   });
 
+  const handleFetchTrendyolOrders = async () => {
+      setIsFetchingTrendyol(true);
+      const result = await fetchTrendyolOrders();
+      if (result.success && result.data && result.data.content) {
+          const trendyolOrders = result.data.content;
+          let newOrdersCount = 0;
+          
+          const existingSales = getSales();
+          const products = getProducts();
+          const platforms = getPlatforms();
+          const trendyolPlatform = platforms.find((p: Platform) => p.name.toLowerCase().includes('trendyol'));
+
+          trendyolOrders.forEach((order: any) => {
+              const existing = existingSales.find((s: Sale) => s.orderNumber === order.orderNumber);
+              
+              if (!existing) {
+                  const saleItems: SaleItem[] = order.lines.map((line: any) => {
+                      const product = products.find((p: Product) => p.code === line.productCode || p.barcode === line.barcode);
+                      
+                      return {
+                          productId: product ? product.id : generateId(),
+                          productName: line.productName,
+                          quantity: line.quantity,
+                          unitPrice: line.price,
+                          totalPrice: line.price * line.quantity,
+                          vatRate: 20,
+                          vatAmount: (line.price * line.quantity * 20) / 120,
+                          returnedQuantity: 0
+                      };
+                  });
+                  
+                  const newSale: Sale = {
+                      id: generateId(),
+                      orderNumber: order.orderNumber,
+                      customerId: generateId(),
+                      customerName: `${order.customerFirstName} ${order.customerLastName}`,
+                      items: saleItems,
+                      subTotal: order.totalPrice,
+                      discount: 0,
+                      totalAmount: order.totalPrice,
+                      totalVat: saleItems.reduce((sum: number, item: SaleItem) => sum + item.vatAmount, 0),
+                      date: new Date().toISOString(),
+                      status: order.shipmentPackageStatus === 'Cancelled' ? 'cancelled' : 'completed',
+                      platformId: trendyolPlatform?.id || 'trendyol'
+                  };
+                  
+                  saveSale(newSale);
+                  newOrdersCount++;
+              }
+          });
+          
+          alert(`Sipariş çekme başarılı. ${newOrdersCount} yeni sipariş eklendi.`);
+          loadSales();
+      } else {
+          alert(result.message || 'Siparişler çekilemedi.');
+      }
+      setIsFetchingTrendyol(false);
+  };
+
+  const getPlatformName = (platformId?: string) => {
+      if (!platformId) return null;
+      if (platformId === 'trendyol') return 'Trendyol';
+      const platforms = getPlatforms();
+      const platform = platforms.find((p: Platform) => p.id === platformId);
+      return platform ? platform.name : null;
+  };
+
   return (
     <div className="space-y-6">
        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4">
@@ -175,6 +246,15 @@ const SalesHistory: React.FC = () => {
                     <span>Seçilenleri Sil ({selectedIds.size})</span>
                 </button>
             )}
+
+            <button 
+                onClick={handleFetchTrendyolOrders}
+                disabled={isFetchingTrendyol}
+                className="bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded-lg flex items-center space-x-2 transition-colors shadow-lg shadow-orange-200 dark:shadow-none disabled:opacity-50"
+            >
+                {isFetchingTrendyol ? <RotateCcw size={18} className="animate-spin" /> : <Square size={18} />}
+                <span className="hidden md:inline">Trendyol'dan Siparişleri Çek</span>
+            </button>
             
             <button 
                 onClick={handleExport}
@@ -242,11 +322,14 @@ const SalesHistory: React.FC = () => {
                             <Calendar size={14} className="mr-1 text-gray-400"/>
                             {new Date(sale.date).toLocaleDateString('tr-TR')}
                         </div>
-                        <div className="text-xs text-gray-500 font-mono mt-0.5">
+                        <div className="text-xs text-gray-500 font-mono mt-0.5 flex items-center gap-2">
                              {sale.orderNumber ? (
                                 <span className="font-semibold text-blue-600 dark:text-blue-400">#{sale.orderNumber}</span>
                              ) : (
                                 <span>#{sale.id.substring(0,6)}</span>
+                             )}
+                             {(sale.platformId === 'trendyol' || getPlatformName(sale.platformId)?.toLowerCase().includes('trendyol') || sale.orderNumber?.startsWith('TY-')) && (
+                                <span className="bg-orange-100 text-orange-800 text-[10px] px-1.5 py-0.5 rounded font-bold dark:bg-orange-900/40 dark:text-orange-400">Trendyol</span>
                              )}
                         </div>
                     </td>

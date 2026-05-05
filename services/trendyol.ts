@@ -96,6 +96,48 @@ const getMockTrendyolData = () => {
     };
 };
 
+const getMockTrendyolOrdersData = () => {
+    return {
+        totalElements: 2,
+        totalPages: 1,
+        page: 0,
+        size: 50,
+        content: [
+            {
+                orderNumber: "TY-ORD-001",
+                customerFirstName: "Ahmet",
+                customerLastName: "Yılmaz",
+                totalPrice: 450.00,
+                shipmentPackageStatus: "Created",
+                lines: [
+                    {
+                        productCode: "TS-BLK-L",
+                        productName: "Erkek Parfüm - Black Edition",
+                        quantity: 1,
+                        price: 450.00
+                    }
+                ]
+            },
+            {
+                orderNumber: "TY-ORD-002",
+                customerFirstName: "Ayşe",
+                customerLastName: "Kaya",
+                totalPrice: 1040.00,
+                shipmentPackageStatus: "Created",
+                lines: [
+                    {
+                        productCode: "TS-WHT-S",
+                        productName: "Kadın Parfüm - White Flowers",
+                        quantity: 2,
+                        price: 520.00
+                    }
+                ]
+            }
+        ]
+    };
+};
+
+
 // --- Fetch Products ---
 export const fetchTrendyolProducts = async () => {
     const config = getTrendyolConfig();
@@ -175,6 +217,83 @@ export const fetchTrendyolProducts = async () => {
         return { 
             success: true, 
             data: getMockTrendyolData(),
+            message: userMessage
+        };
+    }
+};
+
+// --- Fetch Orders ---
+export const fetchTrendyolOrders = async (status: string = 'Created') => {
+    const config = getTrendyolConfig();
+    
+    if (!config || !config.isActive) {
+        return { success: false, message: 'Entegrasyon aktif değil veya yapılandırılmamış.' };
+    }
+
+    const url = `${TRENDYOL_API_BASE}/suppliers/${config.supplierId}/orders?status=${status}&size=50`;
+
+    saveSystemLog({
+        id: generateId(),
+        date: new Date().toISOString(),
+        source: 'Trendyol Entegrasyonu',
+        type: 'info',
+        title: 'Sipariş Çekme İsteği',
+        message: `Sipariş listesi isteniyor...`,
+    });
+
+    try {
+        const response = await fetchViaProxy(url, {
+            method: 'GET',
+            headers: getHeaders(config.apiKey, config.apiSecret)
+        });
+
+        const responseText = await response.text();
+
+        if (!response.ok) {
+            throw new Error(`HTTP Hata: ${response.status}. Detay: ${responseText.substring(0, 100)}...`);
+        }
+
+        const data = JSON.parse(responseText);
+        
+        saveSystemLog({
+            id: generateId(),
+            date: new Date().toISOString(),
+            source: 'Trendyol Entegrasyonu',
+            type: 'success',
+            title: 'Bağlantı Başarılı',
+            message: `${data.totalElements || data.content?.length || 0} adet sipariş bulundu.`,
+        });
+
+        return { success: true, data };
+
+    } catch (error: any) {
+        console.error("Trendyol Fetch Orders Error:", error);
+        
+        const errorMessage = error.message || 'Bilinmeyen hata';
+        let userMessage = errorMessage;
+        let isMock = false;
+
+        if (errorMessage === "PROXY_NOT_FOUND" || errorMessage.includes("Failed to fetch")) {
+            userMessage = "Lokal Sunucu Modu: Proxy aktif değil. Simülasyon verisi gösteriliyor.";
+            isMock = true;
+        } else if (errorMessage.includes("401") || errorMessage.includes("403")) {
+             userMessage = "Trendyol Yetki Hatası: API Key ve Secret'ı kontrol ediniz. (Simülasyon verisi gösteriliyor)";
+             isMock = true;
+        }
+
+        saveSystemLog({
+            id: generateId(),
+            date: new Date().toISOString(),
+            source: 'Trendyol Entegrasyonu',
+            type: 'warning',
+            title: isMock ? 'Simülasyon Modu Aktif' : 'Bağlantı Hatası',
+            message: userMessage,
+            stackTrace: error.stack
+        });
+
+        return { 
+            success: true, 
+            data: getMockTrendyolOrdersData(),
             message: userMessage
         };
     }

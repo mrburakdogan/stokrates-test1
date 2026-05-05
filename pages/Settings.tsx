@@ -793,7 +793,14 @@ const MessageSettings: React.FC = () => {
 
 const IntegrationSettings: React.FC = () => {
     const [config, setConfig] = useState<TrendyolConfig>({
-        isActive: false, supplierId: '', apiKey: '', apiSecret: '', isTestMode: false, useProxy: true
+        isActive: true, 
+        supplierId: '1139708', 
+        apiKey: 'ZgWUXn1SgVTa8hiOFnGU', 
+        apiSecret: 'L3IN5nYzaYtOvmhrdpSv', 
+        token: 'WmdXVVhuMVNnVlRhOGhpT0ZuR1U6TDNJTjVuWXphWXRPdm1ocmRwU3Y=',
+        integrationCode: '3fec313a-ceda-48be-ae18-f89dac3c462a',
+        isTestMode: false, 
+        useProxy: true
     });
     const [loading, setLoading] = useState(false);
     const [status, setStatus] = useState<{ type: 'idle' | 'success' | 'error', message: string }>({ type: 'idle', message: '' });
