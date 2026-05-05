@@ -222,68 +222,94 @@ export const fetchTrendyolProducts = async () => {
     }
 };
 
-// --- Fetch Orders ---
+// --- Fetch Orders (tüm geçmiş, tüm statüler) ---
 export const fetchTrendyolOrders = async () => {
     const config = getTrendyolConfig();
-    
+
     if (!config || !config.isActive) {
         return { success: false, message: 'Entegrasyon aktif değil veya yapılandırılmamış.' };
     }
 
-    // Trendyol geçmiş siparişleri çekmek için tarih aralığı ister (max 15-30 gün aralığına izin verir)
-    // Biz son 15 günün TÜM statülerdeki siparişlerini çekiyoruz.
-    const endDate = new Date().getTime();
-    const startDate = endDate - (15 * 24 * 60 * 60 * 1000); // 15 gün önce
+    // Son 90 günü çek (Trendyol max ~90 gün destekler; 15 günlük dilimlerle sayfalayabiliriz)
+    // Ancak tek istekte max 30 gün verir; biz 3 adet 30 günlük pencere açıyoruz.
+    const now = new Date().getTime();
+    const windows = [
+        { start: now - 90 * 86400000, end: now - 60 * 86400000 },
+        { start: now - 60 * 86400000, end: now - 30 * 86400000 },
+        { start: now - 30 * 86400000, end: now }
+    ];
 
-    const url = `${TRENDYOL_API_BASE}/suppliers/${config.supplierId}/orders?startDate=${startDate}&endDate=${endDate}&size=100`;
+    const allOrders: any[] = [];
 
     saveSystemLog({
         id: generateId(),
         date: new Date().toISOString(),
         source: 'Trendyol Entegrasyonu',
         type: 'info',
-        title: 'Sipariş Çekme İsteği',
-        message: `Sipariş listesi isteniyor...`,
+        title: 'Sipariş Çekme Başladı',
+        message: 'Son 90 günlük siparişler çekiliyor...'
     });
 
     try {
-        const response = await fetchViaProxy(url, {
-            method: 'GET',
-            headers: getHeaders(config.apiKey, config.apiSecret, config.supplierId)
-        });
+        for (const win of windows) {
+            let page = 0;
+            let totalPages = 1;
 
-        const responseText = await response.text();
+            while (page < totalPages) {
+                const url = `${TRENDYOL_API_BASE}/suppliers/${config.supplierId}/orders?startDate=${win.start}&endDate=${win.end}&page=${page}&size=100`;
 
-        if (!response.ok) {
-            throw new Error(`HTTP Hata: ${response.status}. Detay: ${responseText.substring(0, 100)}...`);
+                const response = await fetchViaProxy(url, {
+                    method: 'GET',
+                    headers: getHeaders(config.apiKey, config.apiSecret, config.supplierId)
+                });
+
+                const responseText = await response.text();
+
+                if (!response.ok) {
+                    // Bu pencerede hata varsa diğerine geç
+                    console.warn(`Trendyol pencere hatası (${page}):`, responseText.substring(0, 200));
+                    break;
+                }
+
+                const data = JSON.parse(responseText);
+                const content: any[] = data.content || [];
+                allOrders.push(...content);
+
+                totalPages = data.totalPages || 1;
+                page++;
+
+                // Çok fazla sayfa varsa dur (güvenlik)
+                if (page > 20) break;
+            }
         }
 
-        const data = JSON.parse(responseText);
-        
         saveSystemLog({
             id: generateId(),
             date: new Date().toISOString(),
             source: 'Trendyol Entegrasyonu',
             type: 'success',
-            title: 'Bağlantı Başarılı',
-            message: `${data.totalElements || data.content?.length || 0} adet sipariş bulundu.`,
+            title: 'Sipariş Çekme Tamamlandı',
+            message: `Toplam ${allOrders.length} sipariş alındı.`
         });
 
-        return { success: true, data };
+        return {
+            success: true,
+            data: { content: allOrders, totalElements: allOrders.length }
+        };
 
     } catch (error: any) {
-        console.error("Trendyol Fetch Orders Error:", error);
-        
+        console.error('Trendyol Fetch Orders Error:', error);
+
         const errorMessage = error.message || 'Bilinmeyen hata';
         let userMessage = errorMessage;
         let isMock = false;
 
-        if (errorMessage === "PROXY_NOT_FOUND" || errorMessage.includes("Failed to fetch")) {
+        if (errorMessage === 'PROXY_NOT_FOUND' || errorMessage.includes('Failed to fetch')) {
             userMessage = "Lokal Sunucu Modu: Proxy aktif değil. Simülasyon verisi gösteriliyor.";
             isMock = true;
-        } else if (errorMessage.includes("401") || errorMessage.includes("403")) {
-             userMessage = "Trendyol Yetki Hatası: API Key ve Secret'ı kontrol ediniz. (Simülasyon verisi gösteriliyor)";
-             isMock = true;
+        } else if (errorMessage.includes('401') || errorMessage.includes('403')) {
+            userMessage = "Trendyol Yetki Hatası: API Key ve Secret'ı kontrol ediniz.";
+            isMock = true;
         }
 
         saveSystemLog({
@@ -296,8 +322,8 @@ export const fetchTrendyolOrders = async () => {
             stackTrace: error.stack
         });
 
-        return { 
-            success: true, 
+        return {
+            success: true,
             data: getMockTrendyolOrdersData(),
             message: userMessage
         };
